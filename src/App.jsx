@@ -2009,32 +2009,42 @@ function ModalAdministracion({ onClose }) {
   };
 
   // ════ USUARIOS ════
-  const guardarUsuario = () => {
+  const [guardandoUsuario, setGuardandoUsuario] = useState(false);
+  const [errorUsuario, setErrorUsuario] = useState("");
+  const guardarUsuario = async () => {
     if (!formUser?.nombre?.trim()) return;
-    let nuevos;
-    if (formUser.id === "nuevo") {
-      const newId = Math.max(...usuarios.map(u => u.id)) + 1;
-      const nuevo = { id: newId, nombre: formUser.nombre.trim(), empresaId: Number(formUser.empresaId), rol: formUser.rol || "trabajador", activo: true };
-      nuevos = [...usuarios, nuevo];
-      USUARIOS.push(nuevo);
-      // PIN por defecto
-      PINS_DEFAULT[newId] = "1234";
-      // Persistir identidad del nuevo usuario en Firestore
-      try { setDoc(doc(db, "usuariosNuevos", String(newId)), { nombre: nuevo.nombre, empresaId: nuevo.empresaId, rol: nuevo.rol, pin: "1234" }); } catch {}
-    } else {
-      nuevos = usuarios.map(u => u.id === formUser.id ? { ...u, nombre: formUser.nombre.trim(), empresaId: Number(formUser.empresaId), rol: formUser.rol, activo: formUser.activo } : u);
-      const idx = USUARIOS.findIndex(u => u.id === formUser.id);
-      if (idx >= 0) USUARIOS[idx] = { ...USUARIOS[idx], ...formUser, empresaId: Number(formUser.empresaId) };
-      // Persistir estado activo/inactivo en Firestore
-      try { setDoc(doc(db, "estadoUsuarios", String(formUser.id)), { activo: formUser.activo !== false }); } catch {}
-      // Si es un usuario nuevo (id > 46), persistir también su identidad editada
-      if (Number(formUser.id) > 46) {
-        try { setDoc(doc(db, "usuariosNuevos", String(formUser.id)), { nombre: formUser.nombre.trim(), empresaId: Number(formUser.empresaId), rol: formUser.rol }, { merge: true }); } catch {}
+    setErrorUsuario("");
+    setGuardandoUsuario(true);
+    try {
+      let nuevos;
+      if (formUser.id === "nuevo") {
+        const newId = Math.max(...usuarios.map(u => u.id)) + 1;
+        const nuevo = { id: newId, nombre: formUser.nombre.trim(), empresaId: Number(formUser.empresaId), rol: formUser.rol || "trabajador", activo: true };
+        // Persistir identidad del nuevo usuario en Firestore PRIMERO — si esto
+        // falla, no tocamos el estado local, para no dar una falsa sensación
+        // de guardado que luego no aparece en otros dispositivos.
+        await setDoc(doc(db, "usuariosNuevos", String(newId)), { nombre: nuevo.nombre, empresaId: nuevo.empresaId, rol: nuevo.rol, pin: "1234" });
+        PINS_DEFAULT[newId] = "1234";
+        nuevos = [...usuarios, nuevo];
+        USUARIOS.push(nuevo);
+      } else {
+        nuevos = usuarios.map(u => u.id === formUser.id ? { ...u, nombre: formUser.nombre.trim(), empresaId: Number(formUser.empresaId), rol: formUser.rol, activo: formUser.activo } : u);
+        await setDoc(doc(db, "estadoUsuarios", String(formUser.id)), { activo: formUser.activo !== false });
+        if (Number(formUser.id) > 46) {
+          await setDoc(doc(db, "usuariosNuevos", String(formUser.id)), { nombre: formUser.nombre.trim(), empresaId: Number(formUser.empresaId), rol: formUser.rol }, { merge: true });
+        }
+        const idx = USUARIOS.findIndex(u => u.id === formUser.id);
+        if (idx >= 0) USUARIOS[idx] = { ...USUARIOS[idx], ...formUser, empresaId: Number(formUser.empresaId) };
       }
+      setUsuarios(nuevos);
+      persistConfig("usuarios", nuevos);
+      setFormUser(null);
+    } catch (e) {
+      console.error("Error guardando usuario:", e);
+      setErrorUsuario("No se pudo guardar. Revisa tu conexión e inténtalo de nuevo — el cambio NO se ha aplicado.");
+    } finally {
+      setGuardandoUsuario(false);
     }
-    setUsuarios(nuevos);
-    persistConfig("usuarios", nuevos);
-    setFormUser(null);
   };
 
   const toggleActivo = async (id) => {
@@ -2061,15 +2071,21 @@ function ModalAdministracion({ onClose }) {
     }
   };
 
-  const eliminarUsuario = (id) => {
+  const eliminarUsuario = async (id) => {
     if (!window.confirm("¿Eliminar este usuario?")) return;
+    if (Number(id) > 46) {
+      try {
+        await deleteDoc(doc(db, "usuariosNuevos", String(id)));
+        await deleteDoc(doc(db, "estadoUsuarios", String(id)));
+      } catch (e) {
+        console.error("Error eliminando usuario:", e);
+        alert("No se pudo eliminar. Revisa tu conexión e inténtalo de nuevo — el usuario NO se ha borrado.");
+        return;
+      }
+    }
     const nuevos = usuarios.filter(u => u.id !== id);
     const idx = USUARIOS.findIndex(u => u.id === id);
     if (idx >= 0) USUARIOS.splice(idx, 1);
-    // Si es un usuario nuevo (id > 46), borrar su registro persistente
-    if (Number(id) > 46) {
-      try { deleteDoc(doc(db, "usuariosNuevos", String(id))); deleteDoc(doc(db, "estadoUsuarios", String(id))); } catch {}
-    }
     setUsuarios(nuevos);
     persistConfig("usuarios", nuevos);
   };
@@ -2227,9 +2243,10 @@ function ModalAdministracion({ onClose }) {
                       </select>
                     </div>
                   </div>
+                  {errorUsuario && <p style={{ margin:"10px 0 0", color:"#E53E3E", fontSize:12, fontWeight:600 }}>{errorUsuario}</p>}
                   <div style={{ display:"flex", gap:8, justifyContent:"flex-end", marginTop:14 }}>
-                    <button onClick={() => setFormUser(null)} style={btnSec}>Cancelar</button>
-                    <button onClick={guardarUsuario} style={btnPri}>Guardar</button>
+                    <button onClick={() => { setFormUser(null); setErrorUsuario(""); }} style={btnSec}>Cancelar</button>
+                    <button onClick={guardarUsuario} disabled={guardandoUsuario} style={{ ...btnPri, opacity: guardandoUsuario ? 0.6 : 1 }}>{guardandoUsuario ? "Guardando…" : "Guardar"}</button>
                   </div>
                 </div>
               )}
@@ -2778,6 +2795,19 @@ export default function App() {
   const [usuarioId,     setUsuarioId]  = useState(() => {
     try { const id = sessionStorage.getItem("grupo_usuario_id"); return id ? Number(id) : null; } catch { return null; }
   });
+
+  // ── Espera a que la sesión (anónima o real) esté confirmada antes de dejar
+  // que cualquier listener de Firestore se suscriba. Sin esto, en el primer
+  // acceso (sin sesión aún en caché), los listeners se montaban antes de que
+  // signInAnonymously terminase, Firestore los rechazaba por falta de permisos,
+  // y ya no se recuperaban solos aunque la sesión se estableciera un instante
+  // después — de ahí que hiciera falta refrescar la página para que funcionara.
+  const [authReady, setAuthReady] = useState(!!auth.currentUser);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => { if (user) setAuthReady(true); });
+    return () => unsub();
+  }, []);
+
   // Los PIN que el usuario cambia se guardan en Firestore (colección "pins")
   // para que el cambio se aplique en cualquier dispositivo/navegador donde
   // inicie sesión, no solo en el que lo cambió. Si un usuario NO tiene entrada
@@ -2785,13 +2815,14 @@ export default function App() {
   // aún no ha pasado por el cambio obligatorio del primer acceso.
   const [pinsCambiados, setPinsCambiados] = useState({}); // { userId: "nuevoPin" } — override sobre PINS_DEFAULT
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(collection(db, "pins"), snap => {
       const m = {};
       snap.docs.forEach(d => { m[Number(d.id)] = d.data().pin; });
       setPinsCambiados(m);
     }, () => {});
     return () => unsub();
-  }, []);
+  }, [authReady]);
   const [loginUsuarioId, setLoginUsuarioId] = useState("");
   const [loginPin,       setLoginPin]       = useState("");
   const [loginError,     setLoginError]     = useState("");
@@ -2823,6 +2854,7 @@ export default function App() {
   // Callbacks para propagar cambios del admin a toda la app en tiempo real
   const [configVersion, setConfigVersion] = useState(0);
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(collection(db, "config"), (snapshot) => {
       let changed = false;
       snapshot.docs.forEach(d => {
@@ -2842,7 +2874,7 @@ export default function App() {
       if (changed) { forceUpdate(n => n + 1); setConfigVersion(v => v + 1); }
     });
     return () => unsub();
-  }, []);
+  }, [authReady]);
   const [modalAdmin,    setModalAdmin] = useState(false);
   const [modalCrear,    setModalCrear] = useState(false);
   const [modalMisTickets, setModalMisTickets] = useState(false);
@@ -2870,6 +2902,7 @@ export default function App() {
   // ── Permisos por módulo/nivel (Fase 2: el menú y las secciones leen de aquí) ──
   const [permisos, setPermisos] = useState(buildPermisosDefault);
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(collection(db, "permisos"), snap => {
       const fromDb = {};
       snap.docs.forEach(d => { fromDb[d.id] = d.data(); });
@@ -2881,7 +2914,7 @@ export default function App() {
       setPermisos(merged);
     }, () => {});
     return () => unsub();
-  }, []);
+  }, [authReady]);
   // Helper: ¿el usuario actual tiene al menos 'nivel' en 'modulo'?
   const can = (modulo, nivel = "visualizacion") => tienePermiso(permisos, usuarioId, modulo, nivel);
 
@@ -2912,19 +2945,21 @@ export default function App() {
   const [usuariosVer, setUsuariosVer] = useState(0);
 
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(collection(db, "estadoUsuarios"), snap => {
       const m = {}; snap.docs.forEach(d => { m[d.id] = d.data().activo; });
       setEstadoMap(m);
     }, () => {});
     return () => unsub();
-  }, []);
+  }, [authReady]);
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(collection(db, "usuariosNuevos"), snap => {
       const m = {}; snap.docs.forEach(d => { m[d.id] = { id: Number(d.id), ...d.data() }; });
       setNuevosMap(m);
     }, () => {});
     return () => unsub();
-  }, []);
+  }, [authReady]);
   // Reconstruir la lista global USUARIOS cada vez que cambien base/nuevos/estado
   useEffect(() => {
     const final = USUARIOS_BASE.map(u => ({ ...u }));
@@ -2954,18 +2989,19 @@ export default function App() {
   // ── Mis vacaciones aprobadas (para reflejarlas en el fichaje) ──
   const [misVacaciones, setMisVacaciones] = useState([]);
   useEffect(() => {
-    if (usuarioId == null) return;
+    if (usuarioId == null || !authReady) return;
     const unsub = onSnapshot(collection(db, "solicitudesRRHH"), snap => {
       setMisVacaciones(snap.docs.map(d => ({ id: d.id, ...d.data() }))
         .filter(s => s.tipo === "vacaciones" && s.estado === "aprobada" && s.usuarioId === usuarioId)
         .map(s => ({ fechaInicio: s.fechaInicio, fechaFin: s.fechaFin })));
     }, () => {});
     return () => unsub();
-  }, [usuarioId]);
+  }, [usuarioId, authReady]);
 
 
   // ── Firebase: tickets en tiempo real ──
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(
       collection(db, "tickets"),
       (snapshot) => {
@@ -2975,10 +3011,11 @@ export default function App() {
       (err) => console.error("Firebase tickets error:", err)
     );
     return () => unsub();
-  }, []);
+  }, [authReady]);
 
   // ── Firebase: comunicados en tiempo real ──
   useEffect(() => {
+    if (!authReady) return;
     // Calcular empresaId directamente desde USUARIOS para no depender de 'usuario'
     // que se define más abajo en el componente
     const miEmpId = (USUARIOS.find(u => u.id === usuarioId))?.empresaId ?? null;
@@ -3002,11 +3039,11 @@ export default function App() {
       setComunicados(activos);
     });
     return () => unsub();
-  }, [usuarioId]);
+  }, [usuarioId, authReady]);
 
   // ── Firebase: fichajes en tiempo real ──
   useEffect(() => {
-    if (!usuarioId) return;
+    if (!usuarioId || !authReady) return;
     const unsub = onSnapshot(collection(db, "fichajes"), snap => {
       const todos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       // Auto-desfichaje a las 15:00 (los míos que sigan abiertos)
@@ -3022,7 +3059,7 @@ export default function App() {
       setFichajeActivo(abierto || null);
     });
     return () => unsub();
-  }, [usuarioId]);
+  }, [usuarioId, authReady]);
 
   const usuario  = USUARIOS.find(u => u.id === usuarioId) || null;
 
@@ -3037,23 +3074,24 @@ export default function App() {
   // Sección "Nóminas" = solo visualización: cada usuario ve ÚNICAMENTE las suyas
   // (protección de datos). La gestión de todas vive en RRHH → Gestión de Nóminas.
   useEffect(() => {
-    if (!usuarioId) return;
+    if (!usuarioId || !authReady) return;
     const unsub = onSnapshot(collection(db, "nominas"), snap => {
       const todas = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       setNominas(todas.filter(n => n.usuarioId === usuarioId));
     });
     return () => unsub();
-  }, [usuarioId, usuario?.rol]);
+  }, [usuarioId, usuario?.rol, authReady]);
 
   // ── Firebase: notificaciones en tiempo real ──
   useEffect(() => {
+    if (!authReady) return;
     const unsub = onSnapshot(
       collection(db, "notificaciones"),
       (snapshot) => { setNotifs(snapshot.docs.map(d => d.data())); },
       (err) => console.error("Firebase notifs error:", err)
     );
     return () => unsub();
-  }, []);
+  }, [authReady]);
 
 
   // Tickets que "pertenecen" al usuario según su rol
