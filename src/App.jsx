@@ -50,6 +50,7 @@ const EMPRESAS = [
   { id: 4, nombre: "Zaqaru",                     color: "#af4a85", inicial: "ZQ" },
   { id: 5, nombre: "Laura Otero S.A.",           color: "#4F8C0d", inicial: "LO" },
 ];
+const EMPRESAS_BASE = EMPRESAS.map(e => ({ ...e }));
 
 const USUARIOS = [
   // ── Independiente ──────────────────────────────────────────────
@@ -1981,31 +1982,55 @@ function ModalAdministracion({ onClose }) {
   };
 
   // ════ EMPRESAS ════
-  const guardarEmpresa = () => {
+  const [guardandoEmpresa, setGuardandoEmpresa] = useState(false);
+  const [errorEmpresa, setErrorEmpresa] = useState("");
+  const guardarEmpresa = async () => {
     if (!formEmp?.nombre?.trim()) return;
-    let nuevas;
-    if (formEmp.id === "nueva") {
-      const newId = Math.max(...empresas.map(e => e.id)) + 1;
-      const nueva = { id: newId, nombre: formEmp.nombre.trim(), color: formEmp.color || "#94A3B8", inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() };
-      nuevas = [...empresas, nueva];
-      EMPRESAS.push(nueva);
-    } else {
-      nuevas = empresas.map(e => e.id === formEmp.id ? { ...e, nombre: formEmp.nombre.trim(), color: formEmp.color, inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() } : e);
-      const idx = EMPRESAS.findIndex(e => e.id === formEmp.id);
-      if (idx >= 0) EMPRESAS[idx] = { ...EMPRESAS[idx], nombre: formEmp.nombre.trim(), color: formEmp.color, inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() };
+    setErrorEmpresa("");
+    setGuardandoEmpresa(true);
+    try {
+      let nuevas;
+      if (formEmp.id === "nueva") {
+        const newId = Math.max(...empresas.map(e => e.id)) + 1;
+        const nueva = { id: newId, nombre: formEmp.nombre.trim(), color: formEmp.color || "#94A3B8", inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() };
+        // Persistir en su propia colección PRIMERO — igual que con los usuarios,
+        // así se sincroniza de verdad en cualquier dispositivo y sobrevive a recargar.
+        await setDoc(doc(db, "empresasNuevas", String(newId)), { nombre: nueva.nombre, color: nueva.color, inicial: nueva.inicial });
+        nuevas = [...empresas, nueva];
+        EMPRESAS.push(nueva);
+      } else {
+        nuevas = empresas.map(e => e.id === formEmp.id ? { ...e, nombre: formEmp.nombre.trim(), color: formEmp.color, inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() } : e);
+        if (Number(formEmp.id) > 5) {
+          await setDoc(doc(db, "empresasNuevas", String(formEmp.id)), { nombre: formEmp.nombre.trim(), color: formEmp.color, inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() }, { merge: true });
+        }
+        const idx = EMPRESAS.findIndex(e => e.id === formEmp.id);
+        if (idx >= 0) EMPRESAS[idx] = { ...EMPRESAS[idx], nombre: formEmp.nombre.trim(), color: formEmp.color, inicial: formEmp.nombre.trim().slice(0,2).toUpperCase() };
+      }
+      setEmpresas(nuevas);
+      setFormEmp(null);
+    } catch (e) {
+      console.error("Error guardando empresa:", e);
+      setErrorEmpresa("No se pudo guardar. Revisa tu conexión e inténtalo de nuevo — el cambio NO se ha aplicado.");
+    } finally {
+      setGuardandoEmpresa(false);
     }
-    setEmpresas(nuevas);
-    persistConfig("empresas", nuevas);
-    setFormEmp(null);
   };
 
-  const eliminarEmpresa = (id) => {
+  const eliminarEmpresa = async (id) => {
     if (!window.confirm("¿Eliminar esta empresa? Los tickets existentes no se verán afectados.")) return;
+    if (Number(id) > 5) {
+      try {
+        await deleteDoc(doc(db, "empresasNuevas", String(id)));
+      } catch (e) {
+        console.error("Error eliminando empresa:", e);
+        alert("No se pudo eliminar. Revisa tu conexión e inténtalo de nuevo — la empresa NO se ha borrado.");
+        return;
+      }
+    }
     const nuevas = empresas.filter(e => e.id !== id);
     const idx = EMPRESAS.findIndex(e => e.id === id);
     if (idx >= 0) EMPRESAS.splice(idx, 1);
     setEmpresas(nuevas);
-    persistConfig("empresas", nuevas);
   };
 
   // ════ USUARIOS ════
@@ -2196,9 +2221,10 @@ function ModalAdministracion({ onClose }) {
                       </div>
                     </div>
                   </div>
+                  {errorEmpresa && <p style={{ margin:"10px 0 0", color:"#E53E3E", fontSize:12, fontWeight:600 }}>{errorEmpresa}</p>}
                   <div style={{ display:"flex", gap:8, justifyContent:"flex-end", marginTop:14 }}>
-                    <button onClick={() => setFormEmp(null)} style={btnSec}>Cancelar</button>
-                    <button onClick={guardarEmpresa} style={btnPri}>Guardar</button>
+                    <button onClick={() => { setFormEmp(null); setErrorEmpresa(""); }} style={btnSec}>Cancelar</button>
+                    <button onClick={guardarEmpresa} disabled={guardandoEmpresa} style={{ ...btnPri, opacity: guardandoEmpresa ? 0.6 : 1 }}>{guardandoEmpresa ? "Guardando…" : "Guardar"}</button>
                   </div>
                 </div>
               )}
@@ -2952,6 +2978,26 @@ export default function App() {
     }, () => {});
     return () => unsub();
   }, [authReady]);
+  // ── Empresas: base (código) + nuevas creadas desde Administración (Firestore) ──
+  const [nuevasEmpresasMap, setNuevasEmpresasMap] = useState({}); // empresasNuevas: id -> {nombre,color,inicial}
+  useEffect(() => {
+    if (!authReady) return;
+    const unsub = onSnapshot(collection(db, "empresasNuevas"), snap => {
+      const m = {}; snap.docs.forEach(d => { m[d.id] = { id: Number(d.id), ...d.data() }; });
+      setNuevasEmpresasMap(m);
+    }, () => {});
+    return () => unsub();
+  }, [authReady]);
+  // Reconstruir la lista global EMPRESAS cada vez que cambien las nuevas
+  useEffect(() => {
+    const final = EMPRESAS_BASE.map(e => ({ ...e }));
+    Object.values(nuevasEmpresasMap).forEach(nv => {
+      if (!final.some(e => e.id === nv.id)) final.push({ id: nv.id, nombre: nv.nombre, color: nv.color, inicial: nv.inicial });
+    });
+    EMPRESAS.length = 0;
+    EMPRESAS.push(...final);
+  }, [nuevasEmpresasMap]);
+
   useEffect(() => {
     if (!authReady) return;
     const unsub = onSnapshot(collection(db, "usuariosNuevos"), snap => {
